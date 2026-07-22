@@ -1,4 +1,4 @@
-module github.com/wundergraph/cosmo/router
+module github.com/mwisner/cosmo/router
 
 go 1.25.0
 

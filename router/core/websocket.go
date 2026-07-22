@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"regexp"
 	"slices"
 	"sync"
@@ -626,6 +627,47 @@ func (h *WebsocketHandler) closeAllConnections() {
 	}
 }
 
+// Verbose per-frame outbound subscription logging. Gated by env so it is a
+// no-op in normal operation (a single nil check per frame). Enable with
+// ROUTER_LOG_SUBSCRIPTION_OUTPUT=true. To target a single subscriber instead of
+// logging every frame of every subscription, set ROUTER_LOG_SUBSCRIPTION_MATCH_CLAIM
+// to a JWT claim key and ROUTER_LOG_SUBSCRIPTION_MATCH_VALUE to the value it must
+// equal; with no match claim configured every subscription is logged.
+var (
+	logSubscriptionOutput     = os.Getenv("ROUTER_LOG_SUBSCRIPTION_OUTPUT") == "true"
+	logSubscriptionMatchClaim = os.Getenv("ROUTER_LOG_SUBSCRIPTION_MATCH_CLAIM")
+	logSubscriptionMatchValue = os.Getenv("ROUTER_LOG_SUBSCRIPTION_MATCH_VALUE")
+)
+
+// subscriptionOutputMatches reports whether a subscription with the given claims
+// should have its outbound frames logged. With no match claim configured every
+// subscription matches (broad mode); otherwise only subscriptions whose claim
+// equals the configured value are logged (targeted mode).
+func subscriptionOutputMatches(claims authentication.Claims) bool {
+	if logSubscriptionMatchClaim == "" {
+		return true
+	}
+	v, ok := claims[logSubscriptionMatchClaim]
+	if !ok {
+		return false
+	}
+	s, ok := v.(string)
+	return ok && s == logSubscriptionMatchValue
+}
+
+// outboundSubscriptionLog carries per-subscriber identity captured once at
+// subscription setup so Flush can log it with every outbound frame without any
+// per-frame reflection or context lookups. claims is marshaled once here.
+type outboundSubscriptionLog struct {
+	connectionID  int64
+	clientName    string
+	clientVersion string
+	operationName string
+	operationType string
+	operationHash uint64
+	claims        string
+}
+
 type websocketResponseWriter struct {
 	id              string
 	protocol        wsproto.Proto
@@ -636,6 +678,10 @@ type websocketResponseWriter struct {
 	stats           statistics.EngineStatistics
 	propagateErrors bool
 	subscriptions   *sync.Map
+
+	// outboundLog, when non-nil, causes Flush to log each outbound frame with
+	// the subscriber/operation identity captured at setup. Nil in normal operation.
+	outboundLog *outboundSubscriptionLog
 }
 
 var (
@@ -741,6 +787,20 @@ func (rw *websocketResponseWriter) Flush() error {
 			if errorsResult := gjson.GetBytes(payload, "errors"); errorsResult.Type == gjson.JSON {
 				payload, _ = sjson.SetRawBytes(payload, "errors", []byte(`[{"message":"Unable to subscribe"}]`))
 			}
+		}
+
+		if rw.outboundLog != nil {
+			rw.logger.Info("outbound subscription frame",
+				zap.Int64("connection_id", rw.outboundLog.connectionID),
+				zap.String("client_name", rw.outboundLog.clientName),
+				zap.String("client_version", rw.outboundLog.clientVersion),
+				zap.String("operation_name", rw.outboundLog.operationName),
+				zap.String("operation_type", rw.outboundLog.operationType),
+				zap.Uint64("operation_hash", rw.outboundLog.operationHash),
+				zap.String("claims", rw.outboundLog.claims),
+				zap.Int("payload_bytes", len(payload)),
+				zap.ByteString("payload", payload),
+			)
 		}
 
 		err = rw.protocol.WriteGraphQLData(rw.id, payload, extensions)
@@ -1122,6 +1182,28 @@ func (h *WebSocketConnectionHandler) executeSubscription(registration *Subscript
 	reqContext.operation.protocol = OperationProtocolWS
 	reqContext.operation.executionOptions = h.plannerOptions.ExecutionOptions
 	reqContext.operation.traceOptions = h.plannerOptions.TraceOptions
+
+	// Capture per-subscriber identity once, so Flush can log every outbound frame
+	// without re-computing. No-op unless ROUTER_LOG_SUBSCRIPTION_OUTPUT is set, and
+	// skipped entirely for subscriptions that don't match the configured target.
+	if logSubscriptionOutput {
+		var claims authentication.Claims
+		if auth := authentication.FromContext(h.request.Context()); auth != nil {
+			claims = auth.Claims()
+		}
+		if subscriptionOutputMatches(claims) {
+			claimsJSON, _ := json.Marshal(claims)
+			rw.outboundLog = &outboundSubscriptionLog{
+				connectionID:  int64(h.connectionID),
+				clientName:    h.clientInfo.Name,
+				clientVersion: h.clientInfo.Version,
+				operationName: operationCtx.name,
+				operationType: operationCtx.opType,
+				operationHash: operationCtx.hash,
+				claims:        string(claimsJSON),
+			}
+		}
+	}
 
 	resolveCtx := resolve.NewContext(withRequestContext(h.ctx, reqContext))
 
