@@ -45,6 +45,9 @@ type ProviderAdapter struct {
 	// connectivity (kgo connects lazily otherwise) so an unreachable broker surfaces a
 	// distinct "could not connect" error, consistent with the NATS and Redis adapters.
 	skipUnavailable bool
+	// dedup holds the tunable event-deduplication levers (KAFKA_DEDUP_*). Disabled by default; a
+	// per-subscription window is built from it in topicPoller.
+	dedup dedupConfig
 }
 
 type PollerOpts struct {
@@ -53,6 +56,8 @@ type PollerOpts struct {
 
 // topicPoller polls the Kafka topic for new records and calls the updateTriggers function.
 func (p *ProviderAdapter) topicPoller(ctx context.Context, client *kgo.Client, updater datasource.SubscriptionEventUpdater, pollerOpts PollerOpts) error {
+	// One window per poller (per subscription); nil when dedup is disabled.
+	dedup := newDedupWindow(p.dedup)
 	for {
 		select {
 		case <-ctx.Done(): // Close the poller if the context was canceled (subscription ended, or router shutdown/hot reload)
@@ -97,17 +102,35 @@ func (p *ProviderAdapter) topicPoller(ctx context.Context, client *kgo.Client, u
 
 				p.logger.Debug("subscription update", zap.String("topic", r.Topic), zap.ByteString("data", r.Value))
 
-				headers := make(map[string][]byte)
-				for _, header := range r.Headers {
-					headers[header.Key] = header.Value
-				}
-
+				// Count every record received from the broker before any dedup, so
+				// router.streams.received.messages reflects true inbound volume.
 				p.streamMetricStore.Consume(ctx, metric.StreamsEvent{
 					ProviderId:          pollerOpts.providerId,
 					StreamOperationName: kafkaReceive,
 					ProviderType:        metric.ProviderTypeKafka,
 					DestinationName:     r.Topic,
 				})
+
+				// Drop near-simultaneous duplicates before the expensive downstream pipeline.
+				if dedup.isDuplicate(r) {
+					p.streamMetricStore.Deduplicated(ctx, metric.StreamsEvent{
+						ProviderId:          pollerOpts.providerId,
+						StreamOperationName: kafkaReceive,
+						ProviderType:        metric.ProviderTypeKafka,
+						DestinationName:     r.Topic,
+					})
+					p.logger.Debug("dropped duplicate event",
+						zap.String("topic", r.Topic),
+						zap.Int32("partition", r.Partition),
+						zap.Int64("offset", r.Offset),
+					)
+					continue
+				}
+
+				headers := make(map[string][]byte)
+				for _, header := range r.Headers {
+					headers[header.Key] = header.Value
+				}
 
 				updater.Update([]datasource.StreamEvent{
 					&Event{
@@ -363,6 +386,7 @@ func NewProviderAdapter(ctx context.Context, logger *zap.Logger, opts []kgo.Opt,
 		cancel:            cancel,
 		streamMetricStore: store,
 		skipUnavailable:   providerOpts.SkipUnavailableProviders,
+		dedup:             dedupConfigFromEnv(),
 	}, nil
 }
 

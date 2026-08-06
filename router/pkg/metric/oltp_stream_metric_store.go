@@ -46,3 +46,7 @@ func (o *otlpStreamEventMetrics) Produce(ctx context.Context, opts ...otelmetric
 func (o *otlpStreamEventMetrics) Consume(ctx context.Context, opts ...otelmetric.AddOption) {
 	o.instruments.consumedMessages.Add(ctx, 1, opts...)
 }
+
+func (o *otlpStreamEventMetrics) Deduplicated(ctx context.Context, opts ...otelmetric.AddOption) {
+	o.instruments.deduplicatedMessages.Add(ctx, 1, opts...)
+}
