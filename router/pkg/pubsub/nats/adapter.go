@@ -158,12 +158,13 @@ func (p *ProviderAdapter) Subscribe(ctx context.Context, cfg datasource.Subscrip
 							DestinationName:     msg.Subject(),
 						})
 
-						updater.Update([]datasource.StreamEvent{
+						updateResult := updater.Update([]datasource.StreamEvent{
 							&Event{evt: &MutableEvent{
 								Data:    msg.Data(),
 								Headers: map[string][]string(msg.Headers()),
 							}},
 						})
+						p.recordProcessingResult(p.ctx, subConf, msg.Subject(), updateResult)
 
 						// Acknowledge the message after it has been processed
 						ackErr := msg.Ack()
@@ -208,12 +209,13 @@ func (p *ProviderAdapter) Subscribe(ctx context.Context, cfg datasource.Subscrip
 					ProviderType:        metric.ProviderTypeNats,
 					DestinationName:     msg.Subject,
 				})
-				updater.Update([]datasource.StreamEvent{
+				updateResult := updater.Update([]datasource.StreamEvent{
 					&Event{evt: &MutableEvent{
 						Data:    msg.Data,
 						Headers: map[string][]string(msg.Header),
 					}},
 				})
+				p.recordProcessingResult(p.ctx, subConf, msg.Subject, updateResult)
 			case <-p.ctx.Done():
 				// When the application context is done, we stop the subscriptions
 				for _, subscription := range subscriptions {
@@ -239,6 +241,21 @@ func (p *ProviderAdapter) Subscribe(ctx context.Context, cfg datasource.Subscrip
 	})
 
 	return nil
+}
+
+func (p *ProviderAdapter) recordProcessingResult(ctx context.Context, conf datasource.SubscriptionEventConfiguration, destination string, result datasource.SubscriptionEventUpdateResult) {
+	if result.DispatchedCount > 0 {
+		p.streamMetricStore.Process(ctx, metric.StreamsEvent{
+			ProviderId: conf.ProviderID(), StreamOperationName: natsReceive, ProviderType: metric.ProviderTypeNats,
+			DestinationName: destination, RootFieldName: conf.RootFieldName(), Result: "dispatched", Reason: "none", Count: int64(result.DispatchedCount),
+		})
+	}
+	if dropped := result.InputCount - result.DispatchedCount; dropped > 0 {
+		p.streamMetricStore.Process(ctx, metric.StreamsEvent{
+			ProviderId: conf.ProviderID(), StreamOperationName: natsReceive, ProviderType: metric.ProviderTypeNats,
+			DestinationName: destination, RootFieldName: conf.RootFieldName(), Result: "dropped", Reason: result.DropReason, Count: int64(dropped),
+		})
+	}
 }
 
 func (p *ProviderAdapter) Publish(ctx context.Context, conf datasource.PublishEventConfiguration, events []datasource.StreamEvent) error {

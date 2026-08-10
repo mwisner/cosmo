@@ -30,6 +30,45 @@ type EngineStatistics interface {
 	UnregisterResolver(r ResolverConcurrencyReporter)
 }
 
+// SubscriptionObserver is implemented by engine statistics collectors that expose
+// detailed, low-cardinality subscription outcomes. It is optional so custom
+// EngineStatistics implementations remain source compatible.
+type SubscriptionObserver interface {
+	SubscriptionResolutionError(reason SubscriptionResolutionErrorReason)
+	WebSocketFrame(observation WebSocketFrameObservation)
+}
+
+type SubscriptionResolutionErrorReason string
+
+const (
+	SubscriptionResolutionErrorAuthorization   SubscriptionResolutionErrorReason = "authorization_error"
+	SubscriptionResolutionErrorContextCanceled SubscriptionResolutionErrorReason = "context_canceled"
+	SubscriptionResolutionErrorFetch           SubscriptionResolutionErrorReason = "fetch_error"
+	SubscriptionResolutionErrorHandler         SubscriptionResolutionErrorReason = "handler_error"
+	SubscriptionResolutionErrorInvalidMessage  SubscriptionResolutionErrorReason = "invalid_message"
+	SubscriptionResolutionErrorRateLimit       SubscriptionResolutionErrorReason = "rate_limit"
+	SubscriptionResolutionErrorResolve         SubscriptionResolutionErrorReason = "resolve_error"
+	SubscriptionResolutionErrorTimeout         SubscriptionResolutionErrorReason = "fetch_timeout"
+	SubscriptionResolutionErrorUnknown         SubscriptionResolutionErrorReason = "unknown"
+)
+
+type WebSocketFrameObservation struct {
+	FrameType   string
+	PayloadType string
+	Result      string
+	Reason      string
+}
+
+type SubscriptionResolutionErrorCount struct {
+	Reason SubscriptionResolutionErrorReason
+	Count  uint64
+}
+
+type WebSocketFrameCount struct {
+	Observation WebSocketFrameObservation
+	Count       uint64
+}
+
 type EngineStats struct {
 	ctx           context.Context
 	logger        *zap.Logger
@@ -39,17 +78,22 @@ type EngineStats struct {
 	messagesSent  atomic.Uint64
 	triggers      atomic.Uint64
 
+	resolutionErrors sync.Map // map[SubscriptionResolutionErrorReason]*atomic.Uint64
+	webSocketFrames  sync.Map // map[WebSocketFrameObservation]*atomic.Uint64
+
 	resolverMu        sync.RWMutex
 	resolverReporters map[ResolverConcurrencyReporter]struct{}
 }
 
 type UsageReport struct {
-	Connections           uint64
-	Subscriptions         uint64
-	MessagesSent          uint64
-	Triggers              uint64
-	ResolverMaxConcurrent uint64
-	ResolverInflight      uint64
+	Connections                  uint64
+	Subscriptions                uint64
+	MessagesSent                 uint64
+	Triggers                     uint64
+	ResolverMaxConcurrent        uint64
+	ResolverInflight             uint64
+	SubscriptionResolutionErrors []SubscriptionResolutionErrorCount
+	WebSocketFrames              []WebSocketFrameCount
 }
 
 // NewEngineStats creates a new EngineStats instance. If reportStats is true, the stats will be reported every 5 seconds.
@@ -79,6 +123,20 @@ func (s *EngineStats) GetReport() *UsageReport {
 		report.ResolverInflight += uint64(r.InflightResolves())
 	}
 	s.resolverMu.RUnlock()
+	s.resolutionErrors.Range(func(key, value any) bool {
+		report.SubscriptionResolutionErrors = append(report.SubscriptionResolutionErrors, SubscriptionResolutionErrorCount{
+			Reason: key.(SubscriptionResolutionErrorReason),
+			Count:  value.(*atomic.Uint64).Load(),
+		})
+		return true
+	})
+	s.webSocketFrames.Range(func(key, value any) bool {
+		report.WebSocketFrames = append(report.WebSocketFrames, WebSocketFrameCount{
+			Observation: key.(WebSocketFrameObservation),
+			Count:       value.(*atomic.Uint64).Load(),
+		})
+		return true
+	})
 	return report
 }
 
@@ -106,6 +164,16 @@ func (s *EngineStats) reportConnections() {
 
 func (s *EngineStats) SubscriptionUpdateSent() {
 	s.messagesSent.Inc()
+}
+
+func (s *EngineStats) SubscriptionResolutionError(reason SubscriptionResolutionErrorReason) {
+	counter, _ := s.resolutionErrors.LoadOrStore(reason, &atomic.Uint64{})
+	counter.(*atomic.Uint64).Inc()
+}
+
+func (s *EngineStats) WebSocketFrame(observation WebSocketFrameObservation) {
+	counter, _ := s.webSocketFrames.LoadOrStore(observation, &atomic.Uint64{})
+	counter.(*atomic.Uint64).Inc()
 }
 
 func (s *EngineStats) ConnectionsInc() {
@@ -166,6 +234,10 @@ func (s *NoopEngineStats) GetReport() *UsageReport {
 
 func (s *NoopEngineStats) SubscriptionUpdateSent() {}
 
+func (s *NoopEngineStats) SubscriptionResolutionError(_ SubscriptionResolutionErrorReason) {}
+
+func (s *NoopEngineStats) WebSocketFrame(_ WebSocketFrameObservation) {}
+
 func (s *NoopEngineStats) ConnectionsInc() {}
 
 func (s *NoopEngineStats) ConnectionsDec() {}
@@ -187,3 +259,5 @@ func (s *NoopEngineStats) UnregisterResolver(_ ResolverConcurrencyReporter) {}
 
 var _ EngineStatistics = &EngineStats{}
 var _ EngineStatistics = &NoopEngineStats{}
+var _ SubscriptionObserver = &EngineStats{}
+var _ SubscriptionObserver = &NoopEngineStats{}

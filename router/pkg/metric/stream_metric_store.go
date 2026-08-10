@@ -27,17 +27,23 @@ type StreamsEvent struct {
 	ProviderType        ProviderType // The messaging system type that are supported
 	ErrorType           string       // Optional error type, e.g., "publish_error" or "receive_error". If empty, the attribute is not set
 	DestinationName     string       // The name of the destination queue / topic / channel
+	RootFieldName       string       // The GraphQL subscription root field
+	Result              string       // Optional processing result, e.g. "dispatched" or "dropped"
+	Reason              string       // Optional processing reason
+	Count               int64        // Optional event count; defaults to one
 }
 
 // StreamMetricProvider is the interface that wraps the basic Event metric methods.
 type StreamMetricProvider interface {
 	Produce(ctx context.Context, opts ...otelmetric.AddOption)
 	Consume(ctx context.Context, opts ...otelmetric.AddOption)
+	Process(ctx context.Context, count int64, opts ...otelmetric.AddOption)
 }
 
 type StreamMetricStore interface {
 	Produce(ctx context.Context, event StreamsEvent)
 	Consume(ctx context.Context, event StreamsEvent)
+	Process(ctx context.Context, event StreamsEvent)
 }
 
 // StreamMetrics is the store for Event (Kafka/Redis/NATS) metrics.
@@ -119,5 +125,35 @@ func (e *StreamMetrics) Consume(ctx context.Context, event StreamsEvent) {
 
 	for _, provider := range e.providers {
 		provider.Consume(ctx, opt)
+	}
+}
+
+func (e *StreamMetrics) Process(ctx context.Context, event StreamsEvent) {
+	attrs := []attribute.KeyValue{
+		otel.WgStreamOperationName.String(event.StreamOperationName),
+		otel.WgProviderType.String(string(event.ProviderType)),
+	}
+	if event.ProviderId != "" {
+		attrs = append(attrs, otel.WgProviderId.String(event.ProviderId))
+	}
+	if event.DestinationName != "" {
+		attrs = append(attrs, otel.WgDestinationName.String(event.DestinationName))
+	}
+	if event.RootFieldName != "" {
+		attrs = append(attrs, otel.WgGraphQLFieldName.String(event.RootFieldName))
+	}
+	if event.Result != "" {
+		attrs = append(attrs, otel.WgStreamProcessingResult.String(event.Result))
+	}
+	if event.Reason != "" {
+		attrs = append(attrs, otel.WgStreamProcessingReason.String(event.Reason))
+	}
+	count := event.Count
+	if count == 0 {
+		count = 1
+	}
+	opt := e.withAttrs(attrs...)
+	for _, provider := range e.providers {
+		provider.Process(ctx, count, opt)
 	}
 }

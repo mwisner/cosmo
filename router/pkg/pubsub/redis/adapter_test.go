@@ -14,10 +14,12 @@ import (
 
 type noopUpdater struct{}
 
-func (n *noopUpdater) Update(_ []datasource.StreamEvent) {}
-func (n *noopUpdater) Complete()                         {}
-func (n *noopUpdater) Done()                             {}
-func (n *noopUpdater) SetHooks(_ datasource.Hooks)       {}
+func (n *noopUpdater) Update(events []datasource.StreamEvent) datasource.SubscriptionEventUpdateResult {
+	return datasource.SubscriptionEventUpdateResult{InputCount: len(events), DispatchedCount: len(events)}
+}
+func (n *noopUpdater) Complete()                   {}
+func (n *noopUpdater) Done()                       {}
+func (n *noopUpdater) SetHooks(_ datasource.Hooks) {}
 
 func TestProviderAdapter_SubscribeWithoutStartupReturnsError(t *testing.T) {
 	t.Parallel()

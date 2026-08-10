@@ -161,11 +161,12 @@ func (p *ProviderAdapter) Subscribe(ctx context.Context, conf datasource.Subscri
 					ProviderType:        metric.ProviderTypeRedis,
 					DestinationName:     msg.Channel,
 				})
-				updater.Update([]datasource.StreamEvent{
+				updateResult := updater.Update([]datasource.StreamEvent{
 					&Event{evt: &MutableEvent{
 						Data: []byte(msg.Payload),
 					}},
 				})
+				p.recordProcessingResult(ctx, conf, msg.Channel, updateResult)
 			case <-p.ctx.Done():
 				// When the application context is done, we stop the subscription if it is not already done
 				log.Debug("application context done, stopping subscription")
@@ -179,6 +180,21 @@ func (p *ProviderAdapter) Subscribe(ctx context.Context, conf datasource.Subscri
 	}()
 
 	return nil
+}
+
+func (p *ProviderAdapter) recordProcessingResult(ctx context.Context, conf datasource.SubscriptionEventConfiguration, destination string, result datasource.SubscriptionEventUpdateResult) {
+	if result.DispatchedCount > 0 {
+		p.streamMetricStore.Process(ctx, metric.StreamsEvent{
+			ProviderId: conf.ProviderID(), StreamOperationName: redisReceive, ProviderType: metric.ProviderTypeRedis,
+			DestinationName: destination, RootFieldName: conf.RootFieldName(), Result: "dispatched", Reason: "none", Count: int64(result.DispatchedCount),
+		})
+	}
+	if dropped := result.InputCount - result.DispatchedCount; dropped > 0 {
+		p.streamMetricStore.Process(ctx, metric.StreamsEvent{
+			ProviderId: conf.ProviderID(), StreamOperationName: redisReceive, ProviderType: metric.ProviderTypeRedis,
+			DestinationName: destination, RootFieldName: conf.RootFieldName(), Result: "dropped", Reason: result.DropReason, Count: int64(dropped),
+		})
+	}
 }
 
 func (p *ProviderAdapter) Publish(ctx context.Context, conf datasource.PublishEventConfiguration, events []datasource.StreamEvent) error {

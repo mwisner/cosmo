@@ -55,7 +55,8 @@ func TestSubscriptionEventUpdater_Update_WithBeforeEventsDispatchHooks_Success(t
 		testEventBuilder,
 	)
 
-	updater.Update(originalEvents)
+	result := updater.Update(originalEvents)
+	assert.Equal(t, SubscriptionEventUpdateResult{InputCount: 1, DispatchedCount: 1}, result)
 
 	select {
 	case receivedArgs := <-receivedArgs:
@@ -99,13 +100,37 @@ func TestSubscriptionEventUpdater_Update_WithBeforeEventsDispatchHooks_Error(t *
 		testEventBuilder,
 	)
 
-	updater.Update(events)
+	result := updater.Update(events)
+	assert.Equal(t, SubscriptionEventUpdateResult{InputCount: 1, DropReason: "before_dispatch_error"}, result)
 
 	// Assert that the whole batch was dropped
 	mockUpdater.AssertNotCalled(t, "Update")
 	mockUpdater.AssertNotCalled(t, "Subscriptions")
 	mockUpdater.AssertNotCalled(t, "UpdateSubscription")
 	mockUpdater.AssertNotCalled(t, "CloseSubscription")
+}
+
+func TestSubscriptionEventUpdater_Update_ReportsEventsRemovedByBeforeDispatchHook(t *testing.T) {
+	mockUpdater := NewMockSubscriptionUpdater(t)
+	config := &testSubscriptionEventConfig{providerID: "test-provider", providerType: ProviderTypeKafka, fieldName: "testField"}
+	events := []StreamEvent{
+		&testEvent{mutableTestEvent("keep")},
+		&testEvent{mutableTestEvent("drop")},
+	}
+	mockUpdater.On("Update", []byte("keep")).Return()
+	updater := NewSubscriptionEventUpdater(config, Hooks{
+		BeforeEventsDispatch: BeforeEventsDispatchHooks{Handlers: []BeforeEventsDispatchFn{
+			func(context.Context, SubscriptionEventConfiguration, EventBuilderFn, []StreamEvent) ([]StreamEvent, error) {
+				return events[:1], nil
+			},
+		}},
+	}, mockUpdater, zap.NewNop(), testEventBuilder)
+
+	result := updater.Update(events)
+
+	assert.Equal(t, SubscriptionEventUpdateResult{
+		InputCount: 2, DispatchedCount: 1, DropReason: "before_dispatch_removed",
+	}, result)
 }
 
 func TestSubscriptionEventUpdater_Update_WithMultipleBeforeEventsDispatchHooks_Success(t *testing.T) {

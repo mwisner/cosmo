@@ -66,11 +66,20 @@ const (
 
 // Messaging metrics attributes
 const (
-	WgStreamOperationName = attribute.Key("wg.stream.operation.name")
-	WgProviderType        = attribute.Key("wg.provider.type")
-	WgDestinationName     = attribute.Key("wg.destination.name")
-	WgProviderId          = attribute.Key("wg.provider.id")
-	WgErrorType           = attribute.Key("wg.error.type")
+	WgStreamOperationName    = attribute.Key("wg.stream.operation.name")
+	WgProviderType           = attribute.Key("wg.provider.type")
+	WgDestinationName        = attribute.Key("wg.destination.name")
+	WgProviderId             = attribute.Key("wg.provider.id")
+	WgErrorType              = attribute.Key("wg.error.type")
+	WgStreamProcessingResult = attribute.Key("wg.stream.processing.result")
+	WgStreamProcessingReason = attribute.Key("wg.stream.processing.reason")
+)
+
+const (
+	WgSubscriptionFrameType   = attribute.Key("wg.subscription.frame.type")
+	WgSubscriptionPayloadType = attribute.Key("wg.subscription.payload.type")
+	WgSubscriptionResult      = attribute.Key("wg.subscription.result")
+	WgSubscriptionReason      = attribute.Key("wg.subscription.reason")
 )
 
 const (

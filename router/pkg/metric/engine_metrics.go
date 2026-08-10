@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	rotel "github.com/wundergraph/cosmo/router/pkg/otel"
 	"github.com/wundergraph/cosmo/router/pkg/statistics"
 	"go.opentelemetry.io/otel/attribute"
 	otelmetric "go.opentelemetry.io/otel/metric"
@@ -16,22 +17,26 @@ const (
 	cosmoEngineMeterName    = "cosmo.router.engine"
 	cosmoEngineMeterVersion = "0.0.1"
 
-	engineMetricBaseKey             = "router.engine."
-	engineConnectionCountKey        = engineMetricBaseKey + "connections"
-	engineSubscriptionCountKey      = engineMetricBaseKey + "subscriptions"
-	engineTriggerCountKey           = engineMetricBaseKey + "triggers"
-	engineMessagesSentKey           = engineMetricBaseKey + "messages.sent"
-	engineResolversMaxConcurrentKey = engineMetricBaseKey + "resolvers.max_concurrent"
-	engineResolversInflightKey      = engineMetricBaseKey + "resolvers.inflight"
+	engineMetricBaseKey                   = "router.engine."
+	engineConnectionCountKey              = engineMetricBaseKey + "connections"
+	engineSubscriptionCountKey            = engineMetricBaseKey + "subscriptions"
+	engineTriggerCountKey                 = engineMetricBaseKey + "triggers"
+	engineMessagesSentKey                 = engineMetricBaseKey + "messages.sent"
+	engineSubscriptionResolutionErrorsKey = engineMetricBaseKey + "subscription.resolution.errors"
+	engineWebSocketFramesKey              = engineMetricBaseKey + "websocket.frames"
+	engineResolversMaxConcurrentKey       = engineMetricBaseKey + "resolvers.max_concurrent"
+	engineResolversInflightKey            = engineMetricBaseKey + "resolvers.inflight"
 )
 
 type engineInstruments struct {
-	connectionCount        otelmetric.Int64ObservableUpDownCounter
-	subscriptionCount      otelmetric.Int64ObservableUpDownCounter
-	triggerCount           otelmetric.Int64ObservableUpDownCounter
-	messagesSent           otelmetric.Int64ObservableCounter
-	resolversMaxConcurrent otelmetric.Int64ObservableUpDownCounter
-	resolversInflight      otelmetric.Int64ObservableUpDownCounter
+	connectionCount              otelmetric.Int64ObservableUpDownCounter
+	subscriptionCount            otelmetric.Int64ObservableUpDownCounter
+	triggerCount                 otelmetric.Int64ObservableUpDownCounter
+	messagesSent                 otelmetric.Int64ObservableCounter
+	subscriptionResolutionErrors otelmetric.Int64ObservableCounter
+	webSocketFrames              otelmetric.Int64ObservableCounter
+	resolversMaxConcurrent       otelmetric.Int64ObservableUpDownCounter
+	resolversInflight            otelmetric.Int64ObservableUpDownCounter
 }
 
 func (i *engineInstruments) toList() []otelmetric.Observable {
@@ -51,6 +56,12 @@ func (i *engineInstruments) toList() []otelmetric.Observable {
 
 	if i.messagesSent != nil {
 		result = append(result, i.messagesSent)
+	}
+	if i.subscriptionResolutionErrors != nil {
+		result = append(result, i.subscriptionResolutionErrors)
+	}
+	if i.webSocketFrames != nil {
+		result = append(result, i.webSocketFrames)
 	}
 
 	if i.resolversMaxConcurrent != nil {
@@ -111,12 +122,14 @@ func setupInstruments(m otelmetric.Meter, statConfig *EngineStatsConfig, resolve
 	var (
 		err error
 
-		connectionCount        otelmetric.Int64ObservableUpDownCounter
-		subscriptionCount      otelmetric.Int64ObservableUpDownCounter
-		triggerCount           otelmetric.Int64ObservableUpDownCounter
-		messagesSent           otelmetric.Int64ObservableCounter
-		resolversMaxConcurrent otelmetric.Int64ObservableUpDownCounter
-		resolversInflight      otelmetric.Int64ObservableUpDownCounter
+		connectionCount              otelmetric.Int64ObservableUpDownCounter
+		subscriptionCount            otelmetric.Int64ObservableUpDownCounter
+		triggerCount                 otelmetric.Int64ObservableUpDownCounter
+		messagesSent                 otelmetric.Int64ObservableCounter
+		subscriptionResolutionErrors otelmetric.Int64ObservableCounter
+		webSocketFrames              otelmetric.Int64ObservableCounter
+		resolversMaxConcurrent       otelmetric.Int64ObservableUpDownCounter
+		resolversInflight            otelmetric.Int64ObservableUpDownCounter
 	)
 
 	if statConfig.Subscription {
@@ -144,6 +157,18 @@ func setupInstruments(m otelmetric.Meter, statConfig *EngineStatsConfig, resolve
 		if err != nil {
 			return nil, err
 		}
+
+		subscriptionResolutionErrors, err = m.Int64ObservableCounter(engineSubscriptionResolutionErrorsKey,
+			otelmetric.WithDescription("Number of subscription resolution errors by reason."))
+		if err != nil {
+			return nil, err
+		}
+
+		webSocketFrames, err = m.Int64ObservableCounter(engineWebSocketFramesKey,
+			otelmetric.WithDescription("Number of subscription WebSocket frame write outcomes."))
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	if resolverStats {
@@ -161,12 +186,14 @@ func setupInstruments(m otelmetric.Meter, statConfig *EngineStatsConfig, resolve
 	}
 
 	return &engineInstruments{
-		connectionCount:        connectionCount,
-		subscriptionCount:      subscriptionCount,
-		triggerCount:           triggerCount,
-		messagesSent:           messagesSent,
-		resolversMaxConcurrent: resolversMaxConcurrent,
-		resolversInflight:      resolversInflight,
+		connectionCount:              connectionCount,
+		subscriptionCount:            subscriptionCount,
+		triggerCount:                 triggerCount,
+		messagesSent:                 messagesSent,
+		subscriptionResolutionErrors: subscriptionResolutionErrors,
+		webSocketFrames:              webSocketFrames,
+		resolversMaxConcurrent:       resolversMaxConcurrent,
+		resolversInflight:            resolversInflight,
 	}, nil
 }
 
@@ -200,6 +227,21 @@ func (e *EngineMetrics) observeInstruments(o otelmetric.Observer, stats statisti
 		o.ObserveInt64(e.instruments.subscriptionCount, int64(report.Subscriptions), otelmetric.WithAttributes(e.baseAttributes...))
 		o.ObserveInt64(e.instruments.triggerCount, int64(report.Triggers), otelmetric.WithAttributes(e.baseAttributes...))
 		o.ObserveInt64(e.instruments.messagesSent, int64(report.MessagesSent), otelmetric.WithAttributes(e.baseAttributes...))
+		for _, item := range report.SubscriptionResolutionErrors {
+			attrs := append([]attribute.KeyValue{}, e.baseAttributes...)
+			attrs = append(attrs, rotel.WgSubscriptionReason.String(string(item.Reason)))
+			o.ObserveInt64(e.instruments.subscriptionResolutionErrors, int64(item.Count), otelmetric.WithAttributes(attrs...))
+		}
+		for _, item := range report.WebSocketFrames {
+			attrs := append([]attribute.KeyValue{}, e.baseAttributes...)
+			attrs = append(attrs,
+				rotel.WgSubscriptionFrameType.String(item.Observation.FrameType),
+				rotel.WgSubscriptionPayloadType.String(item.Observation.PayloadType),
+				rotel.WgSubscriptionResult.String(item.Observation.Result),
+				rotel.WgSubscriptionReason.String(item.Observation.Reason),
+			)
+			o.ObserveInt64(e.instruments.webSocketFrames, int64(item.Count), otelmetric.WithAttributes(attrs...))
+		}
 	}
 
 	if e.instruments.resolversMaxConcurrent != nil {

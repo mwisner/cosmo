@@ -17,10 +17,16 @@ const defaultTimeout = 5 * time.Second
 // that provides a way to send the event struct instead of the raw data
 // It is used to give access to the event additional fields to the hooks.
 type SubscriptionEventUpdater interface {
-	Update(events []StreamEvent)
+	Update(events []StreamEvent) SubscriptionEventUpdateResult
 	Complete()
 	Done()
 	SetHooks(hooks Hooks)
+}
+
+type SubscriptionEventUpdateResult struct {
+	InputCount      int
+	DispatchedCount int
+	DropReason      string
 }
 
 type subscriptionEventUpdater struct {
@@ -34,10 +40,20 @@ type subscriptionEventUpdater struct {
 	semaphore                      *semaphore.Weighted
 }
 
-func (s *subscriptionEventUpdater) Update(events []StreamEvent) {
-	events, ok := s.runBeforeEventsDispatchHooks(events)
+func (s *subscriptionEventUpdater) Update(events []StreamEvent) SubscriptionEventUpdateResult {
+	result := SubscriptionEventUpdateResult{InputCount: len(events)}
+	events, ok, dropReason := s.runBeforeEventsDispatchHooks(events)
 	if !ok {
-		return
+		result.DropReason = dropReason
+		return result
+	}
+	for _, event := range events {
+		if event != nil {
+			result.DispatchedCount++
+		}
+	}
+	if result.DispatchedCount < result.InputCount {
+		result.DropReason = "before_dispatch_removed"
 	}
 
 	if len(s.hooks.OnReceiveEvents.Handlers) == 0 {
@@ -47,7 +63,7 @@ func (s *subscriptionEventUpdater) Update(events []StreamEvent) {
 			}
 			s.eventUpdater.Update(event.GetData())
 		}
-		return
+		return result
 	}
 
 	subscriptions := s.eventUpdater.Subscriptions()
@@ -90,14 +106,15 @@ func (s *subscriptionEventUpdater) Update(events []StreamEvent) {
 				"max_concurrent_handlers or reduce handler execution time." +
 				"Events may arrive out of order.")
 	}
+	return result
 }
 
 // runBeforeEventsDispatchHooks runs the BeforeEventsDispatch hooks once per received batch,
 // before any per-subscriber fan-out. It returns the (possibly transformed) events and
 // false if a hook failed and the batch should be dropped.
-func (s *subscriptionEventUpdater) runBeforeEventsDispatchHooks(events []StreamEvent) ([]StreamEvent, bool) {
+func (s *subscriptionEventUpdater) runBeforeEventsDispatchHooks(events []StreamEvent) ([]StreamEvent, bool, string) {
 	if len(s.hooks.BeforeEventsDispatch.Handlers) == 0 {
-		return events, true
+		return events, true, ""
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), s.beforeEventsDispatchTimeout)
@@ -106,11 +123,12 @@ func (s *subscriptionEventUpdater) runBeforeEventsDispatchHooks(events []StreamE
 	type hookResult struct {
 		events []StreamEvent
 		ok     bool
+		reason string
 	}
 	done := make(chan hookResult, 1)
 
 	go func() {
-		res := hookResult{nil, false}
+		res := hookResult{events: nil, ok: false}
 		defer func() {
 			if r := recover(); r != nil {
 				s.logger.
@@ -119,7 +137,8 @@ func (s *subscriptionEventUpdater) runBeforeEventsDispatchHooks(events []StreamE
 						zap.String("handler_name", "BeforeEventsDispatch"),
 						zap.Any("error", r),
 					)
-				res = hookResult{nil, false}
+				res = hookResult{events: nil, ok: false}
+				res.reason = "before_dispatch_panic"
 			}
 			done <- res
 		}()
@@ -132,19 +151,20 @@ func (s *subscriptionEventUpdater) runBeforeEventsDispatchHooks(events []StreamE
 				s.logger.
 					With(zap.Int("handler_index", i)).
 					Warn("BeforeEventsDispatch handler failed, dropping event batch", zap.Error(err))
+				res.reason = "before_dispatch_error"
 				return
 			}
 		}
-		res = hookResult{evts, true}
+		res = hookResult{events: evts, ok: true}
 	}()
 
 	select {
 	case res := <-done:
-		return res.events, res.ok
+		return res.events, res.ok, res.reason
 	case <-ctx.Done():
 		s.logger.Warn("BeforeEventsDispatch handler timeout exceeded, dropping event batch. " +
 			"Consider increasing events.handler.before_events_dispatch.handler_timeout or reduce handler execution time.")
-		return nil, false
+		return nil, false, "before_dispatch_timeout"
 	}
 }
 

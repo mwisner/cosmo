@@ -48,7 +48,8 @@ type ProviderAdapter struct {
 }
 
 type PollerOpts struct {
-	providerId string
+	providerId    string
+	rootFieldName string
 }
 
 // topicPoller polls the Kafka topic for new records and calls the updateTriggers function.
@@ -109,7 +110,7 @@ func (p *ProviderAdapter) topicPoller(ctx context.Context, client *kgo.Client, u
 					DestinationName:     r.Topic,
 				})
 
-				updater.Update([]datasource.StreamEvent{
+				updateResult := updater.Update([]datasource.StreamEvent{
 					&Event{
 						evt: &MutableEvent{
 							Data:    r.Value,
@@ -118,6 +119,31 @@ func (p *ProviderAdapter) topicPoller(ctx context.Context, client *kgo.Client, u
 						},
 					},
 				})
+				if updateResult.DispatchedCount > 0 {
+					p.streamMetricStore.Process(ctx, metric.StreamsEvent{
+						ProviderId:          pollerOpts.providerId,
+						StreamOperationName: kafkaReceive,
+						ProviderType:        metric.ProviderTypeKafka,
+						DestinationName:     r.Topic,
+						RootFieldName:       pollerOpts.rootFieldName,
+						Result:              "dispatched",
+						Reason:              "none",
+						Count:               int64(updateResult.DispatchedCount),
+					})
+				}
+				droppedCount := updateResult.InputCount - updateResult.DispatchedCount
+				if droppedCount > 0 {
+					p.streamMetricStore.Process(ctx, metric.StreamsEvent{
+						ProviderId:          pollerOpts.providerId,
+						StreamOperationName: kafkaReceive,
+						ProviderType:        metric.ProviderTypeKafka,
+						DestinationName:     r.Topic,
+						RootFieldName:       pollerOpts.rootFieldName,
+						Result:              "dropped",
+						Reason:              updateResult.DropReason,
+						Count:               int64(droppedCount),
+					})
+				}
 			}
 		}
 	}
@@ -173,7 +199,10 @@ func (p *ProviderAdapter) Subscribe(ctx context.Context, conf datasource.Subscri
 		stop := context.AfterFunc(p.ctx, cancel)
 		defer stop()
 
-		err := p.topicPoller(pollerCtx, client, updater, PollerOpts{providerId: conf.ProviderID()})
+		err := p.topicPoller(pollerCtx, client, updater, PollerOpts{
+			providerId:    conf.ProviderID(),
+			rootFieldName: conf.RootFieldName(),
+		})
 		if err != nil {
 			if errors.Is(err, errClientClosed) || errors.Is(err, context.Canceled) {
 				log.Debug("poller canceled", zap.Error(err))
