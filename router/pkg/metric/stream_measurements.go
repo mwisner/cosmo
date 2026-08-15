@@ -7,8 +7,9 @@ import (
 )
 
 const (
-	messagingSentMessages     = "router.streams.sent.messages"
-	messagingConsumedMessages = "router.streams.received.messages"
+	messagingSentMessages      = "router.streams.sent.messages"
+	messagingConsumedMessages  = "router.streams.received.messages"
+	messagingProcessedMessages = "router.streams.processed.messages"
 )
 
 var (
@@ -18,11 +19,15 @@ var (
 	messagingConsumedMessagesOptions = []otelmetric.Int64CounterOption{
 		otelmetric.WithDescription("Number of stream consumed messages"),
 	}
+	messagingProcessedMessagesOptions = []otelmetric.Int64CounterOption{
+		otelmetric.WithDescription("Number of stream messages dispatched or dropped before subscription fan-out"),
+	}
 )
 
 type eventInstruments struct {
-	producedMessages otelmetric.Int64Counter
-	consumedMessages otelmetric.Int64Counter
+	producedMessages  otelmetric.Int64Counter
+	consumedMessages  otelmetric.Int64Counter
+	processedMessages otelmetric.Int64Counter
 }
 
 func newStreamEventInstruments(meter otelmetric.Meter) (*eventInstruments, error) {
@@ -42,8 +47,17 @@ func newStreamEventInstruments(meter otelmetric.Meter) (*eventInstruments, error
 		return nil, fmt.Errorf("failed to create received messages counter: %w", err)
 	}
 
+	processedCounter, err := meter.Int64Counter(
+		messagingProcessedMessages,
+		messagingProcessedMessagesOptions...,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create processed messages counter: %w", err)
+	}
+
 	return &eventInstruments{
-		producedMessages: producedCounter,
-		consumedMessages: consumedCounter,
+		producedMessages:  producedCounter,
+		consumedMessages:  consumedCounter,
+		processedMessages: processedCounter,
 	}, nil
 }

@@ -477,6 +477,17 @@ func (h *GraphQLHandler) writeError(ctx *resolve.Context, err error, res *resolv
 	}
 
 	requestLogger := reqContext.logger
+	errorKind := getErrorType(err)
+	observer, observesSubscriptions := h.engineStats.(statistics.SubscriptionObserver)
+	if _, isSubscription := w.(resolve.SubscriptionResponseWriter); isSubscription && observesSubscriptions {
+		reason := subscriptionResolutionErrorReason(errorKind)
+		observer.SubscriptionResolutionError(reason)
+		requestLogger.Warn("Subscription resolution failed",
+			zap.String("reason", string(reason)),
+			zap.Bool("terminal", terminal || isTerminalSubscriptionError(err)),
+			zap.Error(err),
+		)
+	}
 
 	httpWriter, isHttpResponseWriter := w.(http.ResponseWriter)
 	response := GraphQLErrorResponse{
@@ -484,7 +495,7 @@ func (h *GraphQLHandler) writeError(ctx *resolve.Context, err error, res *resolv
 		Data:   nil,
 	}
 
-	switch getErrorType(err) {
+	switch errorKind {
 	case errorTypeMergeResult:
 		var errMerge resolve.ErrMergeResult
 		if !errors.As(err, &errMerge) {
@@ -635,6 +646,29 @@ func (h *GraphQLHandler) writeError(ctx *resolve.Context, err error, res *resolv
 		} else {
 			requestLogger.Error("Unable to write error response", zap.Error(err))
 		}
+	}
+}
+
+func subscriptionResolutionErrorReason(kind errorType) statistics.SubscriptionResolutionErrorReason {
+	switch kind {
+	case errorTypeRateLimit:
+		return statistics.SubscriptionResolutionErrorRateLimit
+	case errorTypeUnauthorized:
+		return statistics.SubscriptionResolutionErrorAuthorization
+	case errorTypeContextCanceled:
+		return statistics.SubscriptionResolutionErrorContextCanceled
+	case errorTypeContextTimeout:
+		return statistics.SubscriptionResolutionErrorTimeout
+	case errorTypeUpgradeFailed, errorTypeEDFS:
+		return statistics.SubscriptionResolutionErrorFetch
+	case errorTypeStreamsHandlerError:
+		return statistics.SubscriptionResolutionErrorHandler
+	case errorTypeEDFSInvalidMessage, errorTypeInvalidWsSubprotocol:
+		return statistics.SubscriptionResolutionErrorInvalidMessage
+	case errorTypeMergeResult:
+		return statistics.SubscriptionResolutionErrorResolve
+	default:
+		return statistics.SubscriptionResolutionErrorUnknown
 	}
 }
 

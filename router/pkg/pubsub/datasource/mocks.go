@@ -1209,9 +1209,17 @@ func (_c *MockSubscriptionEventUpdater_SetHooks_Call) RunAndReturn(run func(hook
 }
 
 // Update provides a mock function for the type MockSubscriptionEventUpdater
-func (_mock *MockSubscriptionEventUpdater) Update(events []StreamEvent) {
-	_mock.Called(events)
-	return
+func (_mock *MockSubscriptionEventUpdater) Update(events []StreamEvent) SubscriptionEventUpdateResult {
+	ret := _mock.Called(events)
+
+	if len(ret) == 0 {
+		return SubscriptionEventUpdateResult{}
+	}
+
+	if returnFunc, ok := ret.Get(0).(func([]StreamEvent) SubscriptionEventUpdateResult); ok {
+		return returnFunc(events)
+	}
+	return ret.Get(0).(SubscriptionEventUpdateResult)
 }
 
 // MockSubscriptionEventUpdater_Update_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Update'
@@ -1238,12 +1246,12 @@ func (_c *MockSubscriptionEventUpdater_Update_Call) Run(run func(events []Stream
 	return _c
 }
 
-func (_c *MockSubscriptionEventUpdater_Update_Call) Return() *MockSubscriptionEventUpdater_Update_Call {
-	_c.Call.Return()
+func (_c *MockSubscriptionEventUpdater_Update_Call) Return(result SubscriptionEventUpdateResult) *MockSubscriptionEventUpdater_Update_Call {
+	_c.Call.Return(result)
 	return _c
 }
 
-func (_c *MockSubscriptionEventUpdater_Update_Call) RunAndReturn(run func(events []StreamEvent)) *MockSubscriptionEventUpdater_Update_Call {
-	_c.Run(run)
+func (_c *MockSubscriptionEventUpdater_Update_Call) RunAndReturn(run func(events []StreamEvent) SubscriptionEventUpdateResult) *MockSubscriptionEventUpdater_Update_Call {
+	_c.Call.Return(run)
 	return _c
 }

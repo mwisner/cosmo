@@ -47,6 +47,10 @@ func (p *promStreamEventMetrics) Consume(ctx context.Context, opts ...otelmetric
 	p.instruments.consumedMessages.Add(ctx, 1, opts...)
 }
 
+func (p *promStreamEventMetrics) Process(ctx context.Context, count int64, opts ...otelmetric.AddOption) {
+	p.instruments.processedMessages.Add(ctx, count, opts...)
+}
+
 func (p *promStreamEventMetrics) Flush(ctx context.Context) error {
 	return p.meterProvider.ForceFlush(ctx)
 }

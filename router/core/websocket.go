@@ -669,8 +669,12 @@ func (rw *websocketResponseWriter) Complete() {
 	}
 	err := rw.protocol.Complete(rw.id)
 	if err != nil {
-		rw.logger.Debug("Sending complete message", zap.Error(err))
+		reason := webSocketWriteFailureReason(err)
+		rw.observeFrame("complete", "none", "failure", reason)
+		rw.logger.Warn("Sending WebSocket complete message failed", zap.String("reason", reason), zap.Error(err))
+		return
 	}
+	rw.observeFrame("complete", "none", "success", "none")
 }
 
 // Heartbeat is a no-op function for WebSocket subscriptions.
@@ -700,15 +704,22 @@ func (rw *websocketResponseWriter) Error(data []byte) {
 		errors = json.RawMessage(`[{"message":"Unable to subscribe"}]`)
 	}
 	if err := rw.protocol.WriteGraphQLErrors(rw.id, errors, nil); err != nil {
-		rw.logger.Debug("Sending error message", zap.Error(err))
+		reason := webSocketWriteFailureReason(err)
+		rw.observeFrame("terminal_error", "errors_only", "failure", reason)
+		rw.logger.Warn("Sending terminal GraphQL error frame failed", zap.String("reason", reason), zap.Error(err))
 		return
 	}
+	rw.observeFrame("terminal_error", "errors_only", "success", "none")
 	// subscriptions-transport-ws clients rely on an explicit "complete" to end
 	// the stream after a data+errors frame. graphql-transport-ws treats the
 	// "error" frame as terminal per spec, so no follow-up is needed there.
 	if rw.protocol.Subprotocol() == wsproto.SubscriptionsTransportWSSubprotocol {
 		if err := rw.protocol.Complete(rw.id); err != nil {
-			rw.logger.Debug("Sending complete after error", zap.Error(err))
+			reason := webSocketWriteFailureReason(err)
+			rw.observeFrame("complete", "none", "failure", reason)
+			rw.logger.Warn("Sending WebSocket complete after error failed", zap.String("reason", reason), zap.Error(err))
+		} else {
+			rw.observeFrame("complete", "none", "success", "none")
 		}
 	}
 }
@@ -728,6 +739,7 @@ func (rw *websocketResponseWriter) Flush() error {
 				"response_headers": rw.header,
 			})
 			if err != nil {
+				rw.observeFrame("data", webSocketPayloadType(payload), "failure", "serialization_error")
 				rw.logger.Warn("Serializing response headers", zap.Error(err))
 				return err
 			}
@@ -746,10 +758,54 @@ func (rw *websocketResponseWriter) Flush() error {
 		err = rw.protocol.WriteGraphQLData(rw.id, payload, extensions)
 		rw.buf.Reset()
 		if err != nil {
+			reason := webSocketWriteFailureReason(err)
+			rw.observeFrame("data", webSocketPayloadType(payload), "failure", reason)
+			rw.logger.Warn("Sending GraphQL data frame failed", zap.String("reason", reason), zap.Error(err))
 			return err
 		}
+		rw.observeFrame("data", webSocketPayloadType(payload), "success", "none")
 	}
 	return nil
+}
+
+func (rw *websocketResponseWriter) observeFrame(frameType, payloadType, result, reason string) {
+	observer, ok := rw.stats.(statistics.SubscriptionObserver)
+	if !ok {
+		return
+	}
+	observer.WebSocketFrame(statistics.WebSocketFrameObservation{
+		FrameType:   frameType,
+		PayloadType: payloadType,
+		Result:      result,
+		Reason:      reason,
+	})
+}
+
+func webSocketPayloadType(payload []byte) string {
+	data := gjson.GetBytes(payload, "data")
+	hasData := data.Exists() && data.Type != gjson.Null
+	hasErrors := gjson.GetBytes(payload, "errors").Type == gjson.JSON
+	switch {
+	case hasData && hasErrors:
+		return "data_with_errors"
+	case hasErrors:
+		return "errors_only"
+	case hasData:
+		return "data"
+	default:
+		return "none"
+	}
+}
+
+func webSocketWriteFailureReason(err error) string {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "context_canceled"
+	case errors.Is(err, net.ErrClosed), errors.Is(err, syscall.EPIPE), errors.Is(err, syscall.ECONNRESET):
+		return "client_disconnected"
+	default:
+		return "protocol_error"
+	}
 }
 
 func (rw *websocketResponseWriter) SubscriptionResponseWriter() resolve.SubscriptionResponseWriter {

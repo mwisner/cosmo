@@ -46,3 +46,7 @@ func (o *otlpStreamEventMetrics) Produce(ctx context.Context, opts ...otelmetric
 func (o *otlpStreamEventMetrics) Consume(ctx context.Context, opts ...otelmetric.AddOption) {
 	o.instruments.consumedMessages.Add(ctx, 1, opts...)
 }
+
+func (o *otlpStreamEventMetrics) Process(ctx context.Context, count int64, opts ...otelmetric.AddOption) {
+	o.instruments.processedMessages.Add(ctx, count, opts...)
+}
