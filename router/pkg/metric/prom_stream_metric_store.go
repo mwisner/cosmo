@@ -47,6 +47,10 @@ func (p *promStreamEventMetrics) Consume(ctx context.Context, opts ...otelmetric
 	p.instruments.consumedMessages.Add(ctx, 1, opts...)
 }
 
+func (p *promStreamEventMetrics) Deduplicated(ctx context.Context, opts ...otelmetric.AddOption) {
+	p.instruments.deduplicatedMessages.Add(ctx, 1, opts...)
+}
+
 func (p *promStreamEventMetrics) Flush(ctx context.Context) error {
 	return p.meterProvider.ForceFlush(ctx)
 }

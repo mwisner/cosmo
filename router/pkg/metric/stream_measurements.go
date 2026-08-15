@@ -7,8 +7,9 @@ import (
 )
 
 const (
-	messagingSentMessages     = "router.streams.sent.messages"
-	messagingConsumedMessages = "router.streams.received.messages"
+	messagingSentMessages         = "router.streams.sent.messages"
+	messagingConsumedMessages     = "router.streams.received.messages"
+	messagingDeduplicatedMessages = "router.streams.deduplicated.messages"
 )
 
 var (
@@ -18,11 +19,15 @@ var (
 	messagingConsumedMessagesOptions = []otelmetric.Int64CounterOption{
 		otelmetric.WithDescription("Number of stream consumed messages"),
 	}
+	messagingDeduplicatedMessagesOptions = []otelmetric.Int64CounterOption{
+		otelmetric.WithDescription("Number of stream messages dropped as duplicates before dispatch"),
+	}
 )
 
 type eventInstruments struct {
-	producedMessages otelmetric.Int64Counter
-	consumedMessages otelmetric.Int64Counter
+	producedMessages     otelmetric.Int64Counter
+	consumedMessages     otelmetric.Int64Counter
+	deduplicatedMessages otelmetric.Int64Counter
 }
 
 func newStreamEventInstruments(meter otelmetric.Meter) (*eventInstruments, error) {
@@ -42,8 +47,17 @@ func newStreamEventInstruments(meter otelmetric.Meter) (*eventInstruments, error
 		return nil, fmt.Errorf("failed to create received messages counter: %w", err)
 	}
 
+	deduplicatedCounter, err := meter.Int64Counter(
+		messagingDeduplicatedMessages,
+		messagingDeduplicatedMessagesOptions...,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create deduplicated messages counter: %w", err)
+	}
+
 	return &eventInstruments{
-		producedMessages: producedCounter,
-		consumedMessages: consumedCounter,
+		producedMessages:     producedCounter,
+		consumedMessages:     consumedCounter,
+		deduplicatedMessages: deduplicatedCounter,
 	}, nil
 }
